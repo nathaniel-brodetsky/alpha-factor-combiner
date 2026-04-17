@@ -1,10 +1,16 @@
 # Research Notebook: Cross-Sectional Alpha Factor Combiner
+
 ## Quantitative Equity — Machine Learning Alpha Research
+
 ### Author: Quantitative Research Desk | Date: 2024-Q4
 
 ---
 
-> **Abstract:** This notebook operationalises a production-grade, tree-based alpha factor combination framework for cross-sectional equity return prediction. We construct a rich feature space of technical and statistical factors, train an XGBoost regressor under a rigorous Purged Time-Series Cross-Validation regime, and leverage SHAP (SHapley Additive exPlanations) to decompose the model's predictions into auditable, factor-level attribution. The universe is a curated basket of large-cap technology equities sourced from Yahoo Finance.
+> **Abstract:** This notebook operationalises a production-grade, tree-based alpha factor combination framework for
+> cross-sectional equity return prediction. We construct a rich feature space of technical and statistical factors, train
+> an XGBoost regressor under a rigorous Purged Time-Series Cross-Validation regime, and leverage SHAP (SHapley Additive
+> exPlanations) to decompose the model's predictions into auditable, factor-level attribution. The universe is a curated
+> basket of large-cap technology equities sourced from Yahoo Finance.
 
 ---
 
@@ -52,20 +58,22 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 
 ## §1 — Universe Definition & Data Acquisition
 
-We construct a concentrated technology equity universe spanning the largest constituents by market capitalisation. Daily OHLCV data is sourced from Yahoo Finance for the period 2015–2024, providing approximately nine years of history — sufficient for multiple market regimes (bull, bear, COVID shock, rate-cycle repricing).
+We construct a concentrated technology equity universe spanning the largest constituents by market capitalisation. Daily
+OHLCV data is sourced from Yahoo Finance for the period 2015–2024, providing approximately nine years of history —
+sufficient for multiple market regimes (bull, bear, COVID shock, rate-cycle repricing).
 
 ```python
 UNIVERSE: dict = {
-    "AAPL":  "Apple Inc.",
-    "MSFT":  "Microsoft Corporation",
-    "NVDA":  "NVIDIA Corporation",
+    "AAPL": "Apple Inc.",
+    "MSFT": "Microsoft Corporation",
+    "NVDA": "NVIDIA Corporation",
     "GOOGL": "Alphabet Inc. (Class A)",
-    "META":  "Meta Platforms Inc.",
+    "META": "Meta Platforms Inc.",
 }
 
 START_DATE = "2015-01-01"
-END_DATE   = "2024-12-31"
-TICKERS    = list(UNIVERSE.keys())
+END_DATE = "2024-12-31"
+TICKERS = list(UNIVERSE.keys())
 
 logging.info(f"Downloading OHLCV data for {TICKERS} from {START_DATE} to {END_DATE}.")
 
@@ -117,11 +125,11 @@ print("✓ Price series chart saved.")
 
 The `FeatureEngineer` class computes a multi-dimensional factor space across four categories:
 
-| Category | Factors |
-|---|---|
-| **Momentum** | Log-return sums over 5, 10, 21, 63 calendar days |
-| **Mean-Reversion** | Rolling Z-score of price over 20-day and 60-day windows |
-| **Trend / Oscillator** | RSI(14), MACD Line, MACD Signal, MACD Histogram |
+| Category                        | Factors                                                                                                  |
+|---------------------------------|----------------------------------------------------------------------------------------------------------|
+| **Momentum**                    | Log-return sums over 5, 10, 21, 63 calendar days                                                         |
+| **Mean-Reversion**              | Rolling Z-score of price over 20-day and 60-day windows                                                  |
+| **Trend / Oscillator**          | RSI(14), MACD Line, MACD Signal, MACD Histogram                                                          |
 | **Volatility / Microstructure** | Annualised realised volatility (5d, 10d, 21d), vol ratio, ATR(14), volume Z-score, dollar-volume Z-score |
 
 All features are computed via vectorised `pandas` operations; no Python-level loops touch the time-series arrays.
@@ -132,30 +140,31 @@ FORWARD_DAYS = 5  # Prediction horizon: 1-week forward log-return
 fe = FeatureEngineer(price_col="Close", volume_col="Volume")
 
 all_features: list[pd.DataFrame] = []
-all_targets:  list[pd.Series]    = []
+all_targets: list[pd.Series] = []
 
 for ticker in TICKERS:
     df = raw_data[ticker].copy()
-    
+
     feat_df = fe.fit_transform(df)
     feat_df.columns = [f"{ticker}_{col}" for col in feat_df.columns]
-    
+
     target = FeatureEngineer.build_target(
         df["Close"], forward_days=FORWARD_DAYS, log_return=True
     ).rename(ticker)
-    
+
     all_features.append(feat_df)
     all_targets.append(target)
     logging.info(f"  {ticker}: {feat_df.shape[1]} features generated.")
 
-logging.info(f"Feature generation complete. Feature space dimensionality: {all_features[0].shape[1] // len(TICKERS)} per-asset factors.")
+logging.info(
+    f"Feature generation complete. Feature space dimensionality: {all_features[0].shape[1] // len(TICKERS)} per-asset factors.")
 ```
 
 ### §2.1 — Panel Construction (Stacked Cross-Section)
 
 ```python
 panel_features = pd.concat(all_features, axis=0).sort_index()
-panel_targets  = pd.concat(all_targets,  axis=0).sort_index()
+panel_targets = pd.concat(all_targets, axis=0).sort_index()
 
 combined = pd.concat([panel_features, panel_targets.rename("target")], axis=1).dropna()
 
@@ -209,12 +218,18 @@ print("✓ Feature correlation heatmap saved.")
 
 ### §3.1 — Cross-Validation Architecture
 
-The central methodological challenge in financial ML is preventing **look-ahead bias** — the inadvertent leakage of future information into the training set. Standard `k-fold` CV shuffles observations randomly, which in a time-series context allows the model to train on future data while being tested on the past, producing grotesquely optimistic out-of-sample estimates.
+The central methodological challenge in financial ML is preventing **look-ahead bias** — the inadvertent leakage of
+future information into the training set. Standard `k-fold` CV shuffles observations randomly, which in a time-series
+context allows the model to train on future data while being tested on the past, producing grotesquely optimistic
+out-of-sample estimates.
 
 We address this through `PurgedTimeSeriesSplit`, which enforces:
+
 1. **Temporal ordering**: All training observations precede all test observations.
-2. **Purge gap**: A mandatory buffer of `purge_gap` periods is removed at the boundary of the train/test split, eliminating any overlap between the feature window (look-back) and the target horizon (look-forward).
-3. **Embargo**: An additional `embargo_pct` of the sample is held out after the test set to prevent the model from learning to exploit serial correlation.
+2. **Purge gap**: A mandatory buffer of `purge_gap` periods is removed at the boundary of the train/test split,
+   eliminating any overlap between the feature window (look-back) and the target horizon (look-forward).
+3. **Embargo**: An additional `embargo_pct` of the sample is held out after the test set to prevent the model from
+   learning to exploit serial correlation.
 
 ```python
 alpha_model = AlphaModel(
@@ -246,7 +261,8 @@ logging.info("Training complete.")
 print("=" * 65)
 print("  PURGED TIME-SERIES CV — OUT-OF-SAMPLE PERFORMANCE SUMMARY")
 print("=" * 65)
-print(f"  {'Fold':<8} {'Train Start':<14} {'Train End':<14} {'Test Start':<14} {'Test End':<14} {'OOS RMSE':>10} {'OOS IC (ρ)':>12}")
+print(
+    f"  {'Fold':<8} {'Train Start':<14} {'Train End':<14} {'Test Start':<14} {'Test End':<14} {'OOS RMSE':>10} {'OOS IC (ρ)':>12}")
 print("-" * 95)
 
 for fold in training_result.cv_folds:
@@ -261,7 +277,8 @@ for fold in training_result.cv_folds:
     )
 
 print("-" * 95)
-print(f"  {'MEAN':<8} {'':14} {'':14} {'':14} {'':14} {training_result.mean_oos_rmse:>10.6f} {training_result.mean_oos_ic:>12.4f}")
+print(
+    f"  {'MEAN':<8} {'':14} {'':14} {'':14} {'':14} {training_result.mean_oos_rmse:>10.6f} {training_result.mean_oos_ic:>12.4f}")
 print("=" * 65)
 print(f"\n  Final Model — Best Iteration : {training_result.best_iteration}")
 print(f"  Feature Dimensionality       : {len(training_result.feature_names)}")
@@ -279,7 +296,8 @@ fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
 # IC Bar Chart
 colors_ic = ["#2196F3" if ic > 0 else "#F44336" for ic in ic_values]
 bars = ax1.bar(fold_labels, ic_values, color=colors_ic, edgecolor="white", linewidth=0.8)
-ax1.axhline(np.mean(ic_values), color="black", linestyle="--", linewidth=1.2, label=f"Mean IC = {np.mean(ic_values):.4f}")
+ax1.axhline(np.mean(ic_values), color="black", linestyle="--", linewidth=1.2,
+            label=f"Mean IC = {np.mean(ic_values):.4f}")
 ax1.axhline(0, color="grey", linestyle="-", linewidth=0.6, alpha=0.5)
 ax1.set_title("OOS Spearman IC by Fold", fontsize=12, fontweight="bold")
 ax1.set_ylabel("Information Coefficient (Spearman ρ)")
@@ -289,7 +307,8 @@ ax1.spines["right"].set_visible(False)
 
 # RMSE Bar Chart
 ax2.bar(fold_labels, rmse_values, color="#FF9800", edgecolor="white", linewidth=0.8)
-ax2.axhline(np.mean(rmse_values), color="black", linestyle="--", linewidth=1.2, label=f"Mean RMSE = {np.mean(rmse_values):.6f}")
+ax2.axhline(np.mean(rmse_values), color="black", linestyle="--", linewidth=1.2,
+            label=f"Mean RMSE = {np.mean(rmse_values):.6f}")
 ax2.set_title("OOS RMSE by Fold", fontsize=12, fontweight="bold")
 ax2.set_ylabel("Root Mean Squared Error")
 ax2.legend(fontsize=9)
@@ -307,7 +326,10 @@ print("✓ CV performance chart saved.")
 
 ## §4 — SHAP Model Explainability
 
-SHAP (SHapley Additive exPlanations) provides a game-theoretic framework for decomposing any model prediction into additive contributions from each input feature. For tree ensembles, the `TreeExplainer` computes exact Shapley values in **O(TLD²)** time (T = trees, L = leaves, D = max depth), without sampling approximations. This is categorically superior to post-hoc linear proxies (e.g., LIME) for non-linear models.
+SHAP (SHapley Additive exPlanations) provides a game-theoretic framework for decomposing any model prediction into
+additive contributions from each input feature. For tree ensembles, the `TreeExplainer` computes exact Shapley values in
+**O(TLD²)** time (T = trees, L = leaves, D = max depth), without sampling approximations. This is categorically superior
+to post-hoc linear proxies (e.g., LIME) for non-linear models.
 
 ```python
 X_for_shap, y_for_shap = alpha_model._align_and_drop_na(X_raw, y_raw)
@@ -336,7 +358,9 @@ logging.info(f"✓ SHAP values computed. Shape: {shap_values.shape}")
 
 ### §4.1 — SHAP Beeswarm Summary Plot
 
-The beeswarm plot displays every individual observation's SHAP value for each feature. The x-axis encodes **directional attribution** (positive = prediction-increasing), while the colour encodes the **feature value** (red = high, blue = low). This jointly communicates feature importance, directionality, and non-linearity in a single dense visualisation.
+The beeswarm plot displays every individual observation's SHAP value for each feature. The x-axis encodes **directional
+attribution** (positive = prediction-increasing), while the colour encodes the **feature value** (red = high, blue =
+low). This jointly communicates feature importance, directionality, and non-linearity in a single dense visualisation.
 
 ```python
 summary_path = explainer.plot_summary(
@@ -347,6 +371,7 @@ summary_path = explainer.plot_summary(
 print(f"✓ SHAP beeswarm summary saved → {summary_path}")
 
 from IPython.display import Image
+
 Image(str(summary_path))
 ```
 
@@ -360,7 +385,10 @@ Image(str(bar_path))
 
 ### §4.3 — SHAP vs. XGBoost Gain: Importance Comparison
 
-A critical practitioner insight: XGBoost's native `gain` importance is a **model-centric** metric (how much the objective function improves at each split), while SHAP is a **prediction-centric** metric (how much each feature shifts the final output). The two frequently diverge for correlated features, where gain may inflate the importance of a proxy variable.
+A critical practitioner insight: XGBoost's native `gain` importance is a **model-centric** metric (how much the
+objective function improves at each split), while SHAP is a **prediction-centric** metric (how much each feature shifts
+the final output). The two frequently diverge for correlated features, where gain may inflate the importance of a proxy
+variable.
 
 ```python
 gain_importance = alpha_model.get_feature_importance(importance_type="gain")
@@ -375,7 +403,9 @@ Image(str(comparison_path))
 
 ### §4.4 — Top Feature SHAP Dependence Plots
 
-Dependence plots reveal the functional relationship between a single feature and its SHAP contribution, with the scatter point colour encoding the value of the most-interacting feature (selected automatically via maximum absolute covariance).
+Dependence plots reveal the functional relationship between a single feature and its SHAP contribution, with the scatter
+point colour encoding the value of the most-interacting feature (selected automatically via maximum absolute
+covariance).
 
 ```python
 shap_mean = explainer.mean_absolute_shap()
@@ -398,7 +428,9 @@ for feat in top_features:
 
 ### §4.5 — SHAP Waterfall Plot (Single Observation)
 
-The waterfall plot deconstructs one specific prediction into an ordered sum of individual SHAP contributions, starting from the model's global expected value `E[f(X)]`. This is the primary tool for **trade-level explainability** — justifying a position to a risk manager or compliance officer.
+The waterfall plot deconstructs one specific prediction into an ordered sum of individual SHAP contributions, starting
+from the model's global expected value `E[f(X)]`. This is the primary tool for **trade-level explainability** —
+justifying a position to a risk manager or compliance officer.
 
 ```python
 waterfall_path = explainer.plot_waterfall(sample_idx=0, filename="shap_waterfall_obs0.png")
@@ -477,10 +509,10 @@ shap_df = explainer.get_shap_dataframe(index=X_scaled_for_shap.index)
 mean_shap = explainer.mean_absolute_shap()
 
 summary_table = pd.DataFrame({
-    "Mean |SHAP|":      mean_shap,
-    "SHAP Rank":        mean_shap.rank(ascending=False).astype(int),
-    "XGB Gain":         gain_importance.reindex(mean_shap.index).fillna(0.0),
-    "SHAP Std Dev":     shap_df.abs().std(),
+    "Mean |SHAP|": mean_shap,
+    "SHAP Rank": mean_shap.rank(ascending=False).astype(int),
+    "XGB Gain": gain_importance.reindex(mean_shap.index).fillna(0.0),
+    "SHAP Std Dev": shap_df.abs().std(),
     "SHAP 95th Pctile": shap_df.abs().quantile(0.95),
 }).sort_values("Mean |SHAP|", ascending=False)
 
